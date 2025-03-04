@@ -1,0 +1,142 @@
+#!/bin/bash
+# Chironomus riparius Pool-Seq Data Processing Workflow
+# Author: Cosima Caliendof
+# Date: January 2021
+
+################################################################################
+#                               PREPARATION                                    #
+################################################################################
+
+# 1) Combine data files from multiple sources into a common folder
+find /path/to/source/directory -name "*.fq.gz" -exec cp -t /path/to/target/directory {} +
+
+# 2) Trim reads using Trimmomatic v0.39
+# See trimm.sh script for details
+# Continue processing with *.paired.fq files
+
+# 3) Map reads to reference genome
+# Note: Reference genome must be indexed before mapping
+# Using BWA-MEM with seed length 30
+# See mapping.sh script for details
+
+# 4) Convert SAM to BAM format
+samtools view -b *_seed30.sam > *_seed30.bam
+
+# 5) Sort BAM files
+samtools sort *bam
+
+# 6) Index BAM files
+samtools index *bam
+
+# 7) Quality control
+samtools flagstat *.sort.bam > *.sort.flagstat
+
+################################################################################
+#                                FILTERING                                     #
+################################################################################
+
+# 1) Mark and remove duplicates
+samtools view -f 0x0400 *.sort.bam | wc -l  # Count duplicates
+picard MarkDuplicates I=*.sort.bam O=*.sort.rmd.bam M=*.dupstat.txt VALIDATION_STRINGENCY=SILENT REMOVE_DUPLICATES=true
+
+# 2) Filter by SAM flags and mapping quality
+# -f 0x0002: Keep only properly paired reads
+# -F 0x0004: Discard unmapped reads
+# -F 0x0008: Discard reads with unmapped mate
+# -q 20: Keep only reads with mapping quality ≥ 20
+samtools view -q 20 -f 0x0002 -F 0x0004 -F 0x0008 -b *.sort.rmd.bam > *.sort.rmd.q20.bam
+
+# 3) Calculate coverage
+samtools depth *sort.rmd.q20.bam | awk '{print $3}' > *coverage.txt
+
+# 4) Determine positions with coverage between 15 and 250
+cat *coverage.txt | awk '{if ($1 >=15 && $1 <=250) print $1}' | wc -l
+
+################################################################################
+#                       PREPARE FOR POPOOLATION2                               #
+################################################################################
+
+# 1) Merge all files into a single mpileup file
+# See mpileup.sh for details
+
+# 2) Create sync file from mpileup file using Popoolation2
+# See sync_pop.sh for details
+
+# 3) Identify indel regions
+perl /path/to/popoolation2/indel_filtering/identify-indel-regions.pl \
+  --indel-window 5 \
+  --min-count 2 \
+  --input /path/to/chiro_adaptation_pool.mpileup \
+  --output /path/to/chiro_adaptation_pool.indels.gtf
+
+# 4) Calculate FST values (genome-wide differentiation)
+perl /path/to/popoolation2/fst-sliding.pl \
+  --input chiro_adaptation_pool_new.sync \
+  --output chiro_adaptation_pool_ss20.1kb.count3.fst \
+  --min-count 3 \
+  --min-coverage 15 \
+  --max-coverage 2% \
+  --pool-size 100 \
+  --window-size 1000 \
+  --step-size 1000 \
+  --min-covered-fraction 0.5
+
+# 5) Process FST file - remove NA values and extract relevant columns
+sed '/na/d' chiro_adaptation_pool_ss20.1kb.count3.fst > chiro_adaptation_pool_ss20.1kb.count3.fst_cleanofna
+
+# 6) Extract data for specific replicates (e.g., rot replicate across all generations)
+cat chiro_adaptation_pool_ss20.1kb.count3.fst_cleanofna | \
+  awk '{print $1 "\t" $2 "\t" $8 "\t" $177 "\t" $251 "\t" $309 "\t" $351 "\t" $377}' | \
+  sed 's/scaffold//' | \
+  sed 's/1:4=//' | \
+  sed 's/8:12=//' | \
+  sed 's/12:16=//' | \
+  sed 's/16:20=//' | \
+  sed 's/20:24=//' | \
+  sed 's/24:28=//' \
+  > chiro_adaptation_pool_rot_allGen.fst
+
+# 7) Extract data for generation 1 vs generation 7 comparison
+cat chiro_adaptation_pool_ss20.1kb.count3.fst_cleanofna | \
+  awk '{print $1 "\t" $2 "\t" $29}' | \
+  sed 's/scaffold//' | \
+  sed 's/1:2=//' \
+  > chiro_adaptation_pool_blau_1to7.fst
+
+# 8) Perform Fisher's exact test
+perl /path/to/popoolation2/fisher-test.pl \
+  --input chiro_adaptation_pool_new.sync \
+  --output chiro_adaptation_pool_new.sync.fet \
+  --min-count 2 \
+  --min-coverage 15 \
+  --max-coverage 2% \
+  --min-covered-fraction 0.5 \
+  --window-size 1000 \
+  --step-size 1000
+
+# 9) Process FET file - remove NA values and extract relevant data
+sed '/na/d' chiro_adaptation_pool_sync.fet > chiro_adaptation_pool_sync.fet_cleanofna
+
+# 10) Perform Cochran-Mantel-Haenszel test
+perl /path/to/popoolation2/cmh-test.pl \
+  --input chiro_adaptation_pool_new.idf.sync \
+  --output chiro_adaptation_pool_RotvsBlau.cmh \
+  --min-count 3 \
+  --min-coverage 15 \
+  --max-coverage 2% \
+  --population 1-4,5-8,9-12,13-16,17-20,21-24,25-28 \
+  --remove-temp
+
+# 11) Convert CMH results to GWAS format
+perl /path/to/popoolation2/export/cmh2gwas.pl \
+  --input chiro_adaptation_pool_RotvsBlau.cmh \
+  --output chiro_adaptation_pool_RotvsBlau.gwas
+
+# 12) Extract data by treatment (replicate)
+cat chiro_adaptation_pool_new.idf.sync | awk '{print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $8 "\t" $12 "\t" $16 "\t" $20 "\t" $24 "\t" $28}' > chiro_pool_blau.idf.sync
+cat chiro_adaptation_pool_new.idf.sync | awk '{print $1 "\t" $2 "\t" $3 "\t" $5 "\t" $9 "\t" $13 "\t" $17 "\t" $21 "\t" $25 "\t" $29}' > chiro_pool_gold.idf.sync
+cat chiro_adaptation_pool_new.idf.sync | awk '{print $1 "\t" $2 "\t" $3 "\t" $6 "\t" $10 "\t" $14 "\t" $18 "\t" $22 "\t" $26 "\t" $30}' > chiro_pool_grun.idf.sync
+cat chiro_adaptation_pool_new.idf.sync | awk '{print $1 "\t" $2 "\t" $3 "\t" $7 "\t" $11 "\t" $15 "\t" $19 "\t" $23 "\t" $27 "\t" $31}' > chiro_pool_rot.idf.sync
+
+# 13) Extract data for generation 1 vs generation 7 comparison
+cat chiro_adaptation_pool_new.idf.sync | awk '{print $1 "\t" $2 "\t" $3 "\t" $7 "\t" $31}' > chiro_pool_rot_1vs7.idf.sync

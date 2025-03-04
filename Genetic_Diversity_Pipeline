@@ -1,0 +1,175 @@
+#!/bin/bash
+# PoPoolation Analysis Pipeline
+# Author: Cosima Caliendof
+# 
+# This script performs population genomic analyses on Pool-Seq data using PoPoolation tools
+# to calculate genetic diversity measures and detect signatures of selection
+
+# Set up file paths and parameters
+GENOME="/path/to/reference/genome.fasta"
+TOOLS_DIR="/path/to/popoolation"
+SAMPLE="Pool"
+OUTPUT_DIR="/path/to/output"
+POOL_SIZE=200  # Number of chromosomes in the pool
+
+# Step 1: Convert BAM file to mpileup format for a single pool
+echo "Converting BAM to mpileup format..."
+samtools mpileup -B -Q 0 -f ${GENOME} \
+  ${SAMPLE}_bwamem2_seed30.sort.rmd.q20.bam > ${OUTPUT_DIR}/${SAMPLE}.mpileup
+
+# Step 2: Identify and remove indel regions
+echo "Identifying indel regions..."
+perl ${TOOLS_DIR}/popoolation_1.2.2/basic-pipeline/identify-genomic-indel-regions.pl \
+  --indel-window 5 \
+  --min-count 2 \
+  --input ${OUTPUT_DIR}/${SAMPLE}.mpileup \
+  --output ${OUTPUT_DIR}/${SAMPLE}.indels.gtf
+
+echo "Removing indel regions from mpileup..."
+perl ${TOOLS_DIR}/popoolation_1.2.2/basic-pipeline/filter-pileup-by-gtf.pl \
+  --input ${OUTPUT_DIR}/${SAMPLE}.mpileup \
+  --gtf ${OUTPUT_DIR}/${SAMPLE}.indels.gtf \
+  --output ${OUTPUT_DIR}/${SAMPLE}.idf.mpileup
+
+# Step 3: Subsample mpileup to standardize coverage
+echo "Subsampling mpileup to standardize coverage..."
+perl ${TOOLS_DIR}/popoolation_1.2.2/basic-pipeline/subsample-pileup.pl \
+  --min-qual 20 \
+  --method withoutreplace \
+  --max-coverage 50 \
+  --fastq-type sanger \
+  --target-coverage 15 \
+  --input ${OUTPUT_DIR}/${SAMPLE}.idf.mpileup \
+  --output ${OUTPUT_DIR}/${SAMPLE}.idf.ss15.mpileup
+
+# Step 4: Calculate nucleotide diversity (Tajima's Pi) with 10kb windows
+echo "Calculating Tajima's Pi (10kb windows)..."
+perl ${TOOLS_DIR}/popoolation_1.2.2/Variance-sliding.pl \
+  --fastq-type sanger \
+  --measure pi \
+  --min-count 3 \
+  --min-coverage 15 \
+  --max-coverage 50 \
+  --min-covered-fraction 0.5 \
+  --pool-size ${POOL_SIZE} \
+  --window-size 10000 \
+  --step-size 10000 \
+  --input ${OUTPUT_DIR}/${SAMPLE}.idf.ss15.mpileup \
+  --output ${OUTPUT_DIR}/${SAMPLE}.10kb.count3.pi \
+  --snp-output ${OUTPUT_DIR}/${SAMPLE}.10kb.count3.pi.snps
+
+# Step 5: Calculate nucleotide diversity with 1kb windows
+echo "Calculating Tajima's Pi (1kb windows)..."
+perl ${TOOLS_DIR}/popoolation_1.2.2/Variance-sliding.pl \
+  --fastq-type sanger \
+  --measure pi \
+  --min-count 3 \
+  --min-coverage 15 \
+  --max-coverage 50 \
+  --min-covered-fraction 0.5 \
+  --pool-size ${POOL_SIZE} \
+  --window-size 1000 \
+  --step-size 1000 \
+  --input ${OUTPUT_DIR}/${SAMPLE}.idf.ss15.mpileup \
+  --output ${OUTPUT_DIR}/${SAMPLE}.1kb.count3.pi \
+  --snp-output ${OUTPUT_DIR}/${SAMPLE}.1kb.count3.pi.snps
+
+# Step 6: Calculate Watterson's Theta (1kb windows)
+echo "Calculating Watterson's Theta (1kb windows)..."
+perl ${TOOLS_DIR}/popoolation_1.2.2/Variance-sliding.pl \
+  --fastq-type sanger \
+  --measure theta \
+  --min-count 3 \
+  --min-coverage 15 \
+  --max-coverage 50 \
+  --min-covered-fraction 0.5 \
+  --pool-size ${POOL_SIZE} \
+  --window-size 1000 \
+  --step-size 1000 \
+  --input ${OUTPUT_DIR}/${SAMPLE}.idf.ss15.mpileup \
+  --output ${OUTPUT_DIR}/${SAMPLE}.1kb.count3.theta \
+  --snp-output ${OUTPUT_DIR}/${SAMPLE}.1kb.count3.theta.snps
+
+# Step 7: Calculate Tajima's D (1kb windows)
+echo "Calculating Tajima's D (1kb windows)..."
+perl ${TOOLS_DIR}/popoolation_1.2.2/Variance-sliding.pl \
+  --fastq-type sanger \
+  --measure D \
+  --min-count 3 \
+  --min-coverage 15 \
+  --max-coverage 50 \
+  --min-covered-fraction 0.5 \
+  --pool-size ${POOL_SIZE} \
+  --window-size 1000 \
+  --step-size 1000 \
+  --input ${OUTPUT_DIR}/${SAMPLE}.idf.ss15.mpileup \
+  --output ${OUTPUT_DIR}/${SAMPLE}.1kb.count3.D \
+  --snp-output ${OUTPUT_DIR}/${SAMPLE}.1kb.count3.D.snps
+
+# Step 8: Process FST and FET results between populations
+COMPARISON="${SAMPLE}-${SAMPLE}IA"
+
+echo "Processing FST results..."
+# Clean FST output
+cat ${OUTPUT_DIR}/${COMPARISON}.ss15.1kb.count3.fst | \
+  awk '{print $1 "\t" $2 "\t" $6}' | \
+  sed 's/scaffold//' | \
+  sed 's/1:2=//' > ${OUTPUT_DIR}/${COMPARISON}.ss15.1kb.count3.fst_clean
+
+# Remove NA values
+sed '/na/d' ${OUTPUT_DIR}/${COMPARISON}.ss15.1kb.count3.fst_clean > \
+  ${OUTPUT_DIR}/${COMPARISON}.ss15.1kb.count3.fst_cleanofna
+
+echo "Processing FET results..."
+# Clean FET output
+cat ${OUTPUT_DIR}/${COMPARISON}.ss15.1kb.count3.fet | \
+  awk '{print $1 "\t" $2 "\t" $6}' | \
+  sed 's/scaffold//' | \
+  sed 's/1:2=//' > ${OUTPUT_DIR}/${COMPARISON}.ss15.1kb.count3.fet_clean
+
+# Remove NA values
+sed '/na/d' ${OUTPUT_DIR}/${COMPARISON}.ss15.1kb.count3.fet_clean > \
+  ${OUTPUT_DIR}/${COMPARISON}.ss15.1kb.count3.fet_cleanofna
+
+# Extract positions and p-values
+awk '{print $1 "\t" $2}' ${OUTPUT_DIR}/${COMPARISON}.ss15.1kb.count3.fet_cleanofna > \
+  ${OUTPUT_DIR}/positions
+awk '{print $3}' ${OUTPUT_DIR}/${COMPARISON}.ss15.1kb.count3.fet_cleanofna > \
+  ${OUTPUT_DIR}/logpvalues
+
+echo "Calculating FDR-corrected q-values in R..."
+# Create R script for BH correction
+cat > ${OUTPUT_DIR}/calculate_qvalues.R << EOF
+logp <- scan("${OUTPUT_DIR}/logpvalues")
+p <- 10^-logp
+q <- p.adjust(p, method = "fdr")
+write.table(q, file="${OUTPUT_DIR}/qvalues", row.names=FALSE, col.names=FALSE)
+EOF
+
+# Run R script
+Rscript ${OUTPUT_DIR}/calculate_qvalues.R
+
+# Combine positions with q-values
+paste ${OUTPUT_DIR}/positions ${OUTPUT_DIR}/qvalues > ${OUTPUT_DIR}/FET.qvalues
+
+echo "Finding FST outliers (top 1%)..."
+# Determine the FST threshold for top 1% and extract those windows
+Rscript -e "fst <- read.table('${OUTPUT_DIR}/${COMPARISON}.ss15.1kb.count3.fst_cleanofna'); threshold <- quantile(fst[,3], 0.99); cat('FST threshold for top 1%:', threshold, '\n'); write.table(threshold, '${OUTPUT_DIR}/fst_threshold.txt', row.names=FALSE, col.names=FALSE)"
+
+FST_THRESHOLD=$(cat ${OUTPUT_DIR}/fst_threshold.txt)
+cat ${OUTPUT_DIR}/${COMPARISON}.ss15.1kb.count3.fst_cleanofna | \
+  awk -v threshold="$FST_THRESHOLD" '$3 >= threshold {print $0}' > ${OUTPUT_DIR}/FST.tail1
+
+echo "Merging FST and FET results..."
+# Merge FST outliers with FET q-values
+perl ${TOOLS_DIR}/Fst_FET_merge.pl \
+  ${OUTPUT_DIR}/FST.tail1 \
+  ${OUTPUT_DIR}/FET.qvalues \
+  ${OUTPUT_DIR}/FST.FET.qvalues.merged
+
+echo "Finding significant windows (q ≤ 0.01)..."
+# Extract windows with q-value ≤ 0.01
+cat ${OUTPUT_DIR}/FST.FET.qvalues.merged | \
+  awk '$4 <= 0.01 {print $0}' > ${OUTPUT_DIR}/output.q001
+
+echo "Analysis complete! Results available in ${OUTPUT_DIR}"
