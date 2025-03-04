@@ -37,7 +37,7 @@ Each script contains detailed documentation within its header. For the main work
 
 If you use these scripts or methods in your research, please cite:
 
-[Insert citation information when available]
+https://github.com/CoCaliendo/Analysis_AdaptationPattern
 
 ## Contact
 
